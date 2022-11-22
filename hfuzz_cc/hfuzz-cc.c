@@ -389,6 +389,9 @@ static int ccMode(int argc, char** argv) {
 
     commonPostOpts(&j, args);
 
+    /* for(int x=0;x<j;x++) */
+    /*     printf("ccmode argv:%s\n",args[x]); */
+
     return execCC(j, args);
 }
 
@@ -494,6 +497,9 @@ static int ldMode(int argc, char** argv) {
 #endif
 
     commonPostOpts(&j, args);
+
+    /* for(int x=0;x<j;x++) */
+    /*     printf("ldmode argv:%s\n",args[x]); */
 
     return execCC(j, args);
 }

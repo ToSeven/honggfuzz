@@ -17,6 +17,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <stdio.h>
 
 #include "honggfuzz.h"
 #include "libhfcommon/common.h"
@@ -44,10 +46,13 @@ __attribute__((used)) const char* const LIBHFUZZ_module_instrument = "LIBHFUZZ_m
  * If there's no _HF_COV_BITMAP_FD available (running without the honggfuzz
  * supervisor), use a dummy bitmap and control structure located in the BSS
  */
-static feedback_t bbMapFb;
+static feedback_t globalBbMapFb;
+static feedback_t localBbMapFb;  
 
-feedback_t*    globalCovFeedback = &bbMapFb;
-feedback_t*    localCovFeedback  = &bbMapFb;
+extern enum llevel_t hf_log_level;
+
+feedback_t*    globalCovFeedback = &globalBbMapFb;
+feedback_t*    localCovFeedback  = &localBbMapFb;
 cmpfeedback_t* globalCmpFeedback = NULL;
 
 uint32_t my_thread_no = 0;
@@ -173,6 +178,40 @@ static void initializeInstrument(void) {
         }
         logInitLogFile(NULL, _HF_LOG_FD, ll);
     }
+
+    char * level_str = getenv("LOGLEVEL");
+    int level_num=0;
+    if(level_str)
+        level_num = atoi(level_str);
+    
+    switch(level_num)
+    {
+        case 0:
+            hf_log_level=FATAL;
+            break;
+        case 1:
+            hf_log_level=ERROR;
+            break;
+        case 2:
+            hf_log_level=WARNING;
+            break;
+        case 3:
+            hf_log_level=INFO;
+            break;
+        case 4:
+            hf_log_level=DEBUG;
+            break;
+        case 5:
+            hf_log_level=HELP;
+            break;
+        case 6:
+            hf_log_level=HELP_BOLD;
+            break;
+        default:
+            hf_log_level=FATAL;
+            break;
+    }
+
     LOG_D("Initializing pid=%d", (int)getpid());
 
     char* my_thread_no_str = getenv(_HF_THREAD_NO_ENV);
@@ -188,11 +227,11 @@ static void initializeInstrument(void) {
     }
 
     if (!initializeGlobalCovFeedback()) {
-        globalCovFeedback = &bbMapFb;
+        globalCovFeedback = &globalBbMapFb;
         LOG_F("Could not intialize the global coverage feedback map");
     }
     if (!initializeLocalCovFeedback()) {
-        localCovFeedback = &bbMapFb;
+        localCovFeedback = &localBbMapFb;
         LOG_F("Could not intialize the local coverage feedback map");
     }
     initializeCmpFeedback();
@@ -599,6 +638,24 @@ static uint8_t const instrumentCntMap[256] = {
     [65 ... 255] = 1U << 7,
 };
 
+__attribute__((destructor)) void exit_main(void){
+
+    char filename[PATH_MAX];
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    snprintf(filename, sizeof(filename), "./%s%lx%lx", "Localcov_", (unsigned long)tv.tv_sec,
+                                                  (unsigned long)tv.tv_usec);
+
+    files_writeBufToFile(filename,localCovFeedback->pcGuardMap,globalCovFeedback->guardNb,O_WRONLY | O_CREAT |O_TRUNC| O_EXCL | O_CLOEXEC);
+
+    /* memset(filename,0,sizeof(filename)); */
+    /* gettimeofday(&tv, NULL); */
+    /* snprintf(filename, sizeof(filename), "./%s%lx%lx", "Globalcov_", (unsigned long)tv.tv_sec, */
+    /*                                               (unsigned long)tv.tv_usec); */
+    /* files_writeBufToFile(filename,globalCovFeedback->pcGuardMap,_HF_PC_GUARD_MAX,O_WRONLY | O_CREAT |O_TRUNC| O_EXCL | O_CLOEXEC); */
+
+}
+
 HF_REQUIRE_SSE42_POPCNT void __sanitizer_cov_trace_pc_guard(uint32_t* guard_ptr) {
 #if defined(__ANDROID__)
     /*
@@ -649,6 +706,8 @@ HF_REQUIRE_SSE42_POPCNT void __sanitizer_cov_trace_pc_guard(uint32_t* guard_ptr)
     } else {
         ATOMIC_PRE_INC(globalCovFeedback->pidTotalCmp[my_thread_no]);
     }
+
+    LOG_I("guard:%u count:%u ",guard,v);
 
     /* Update the new/global counters */
     const uint8_t newval = instrumentCntMap[v];

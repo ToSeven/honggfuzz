@@ -126,9 +126,9 @@ int HonggfuzzMain(int argc, char** argv) {
  * Declare it 'weak', so it can be safely linked with regular binaries which
  * implement their own main()
  */
-#if !defined(__CYGWIN__)
-__attribute__((weak))
-#endif /* !defined(__CYGWIN__) */
-int main(int argc, char** argv) {
-    return HonggfuzzMain(argc, argv);
-}
+/* #if !defined(__CYGWIN__) */
+/* __attribute__((weak)) */
+/* #endif /1* !defined(__CYGWIN__) *1/ */
+/* int main(int argc, char** argv) { */
+/*     return HonggfuzzMain(argc, argv); */
+/*  } */ 

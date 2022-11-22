@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include "libhfcommon/common.h"
 #include "libhfcommon/util.h"
