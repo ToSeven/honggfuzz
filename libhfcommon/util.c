@@ -27,11 +27,26 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <sys/param.h>
 #if !defined(_HF_ARCH_DARWIN) && !defined(__CYGWIN__)
 #include <link.h>
 #endif /* !defined(_HF_ARCH_DARWIN) && !defined(__CYGWIN__) */
 #include <math.h>
 #include <pthread.h>
+#if defined(_HF_ARCH_LINUX)
+#include <sched.h>
+#endif /* defined(_HF_ARCH_LINUX) */
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
+#include <sys/cpuset.h>
+#endif /* defined(__FreebSD__) */
+#if defined(_HF_ARCH_NETBSD)
+#include <sched.h>
+#endif /* defined(_HF_ARCH_NETBSD) */
+#if defined(__DragonFly__)
+#include <pthread.h>
+#include <pthread_np.h>
+#endif /* defined(__DragonFly__) */
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -39,6 +54,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#if defined(_HF_ARCH_LINUX)
+#include <sys/prctl.h>
+#endif /* defined(_HF_ARCH_LINUX) */
+#if defined(__FreeBSD__)
+#include <sys/procctl.h>
+#endif /* defined(__FreeBSD__) */
+#if defined(__sun)
+#include <sys/pset.h>
+#endif /* defined(__sun) */
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -48,6 +72,109 @@
 #include "libhfcommon/common.h"
 #include "libhfcommon/files.h"
 #include "libhfcommon/log.h"
+
+void util_ParentDeathSigIfAvail(int signo HF_ATTR_UNUSED) {
+#if defined(__FreeBSD__)
+    if (procctl(P_PID, 0, PROC_PDEATHSIG_CTL, &signo) == -1) {
+        PLOG_W("procctl(P_PID, PROC_PDEATHSIG_CTL, signo=%d (%s))", signo, util_sigName(signo));
+    }
+#endif /* defined(__FreeBSD__) */
+#if defined(_HF_ARCH_LINUX)
+    if (prctl(PR_SET_PDEATHSIG, (unsigned long)signo, 0UL, 0UL, 0UL) == -1) {
+        PLOG_W("prctl(PR_SET_PDEATHSIG, signo=%d (%s))", signo, util_sigName(signo));
+    }
+#endif /* defined(_HF_ARCH_LINUX) */
+}
+
+bool util_PinThreadToCPUs(uint32_t threadno, uint32_t cpucnt) {
+    if (cpucnt == 0) {
+        return true;
+    }
+
+    long r = sysconf(_SC_NPROCESSORS_ONLN);
+    if (r == -1) {
+        PLOG_W("sysconf(_SC_NPROCESSORS_ONLN) failed");
+        return false;
+    }
+    uint32_t num_cpus = (uint32_t)r;
+
+    if (cpucnt > num_cpus) {
+        LOG_W("Requested CPUs (%" PRIu32 ") > available CPUs (%" PRIu32 ") for thread #%" PRIu32,
+            cpucnt, num_cpus, threadno);
+        return false;
+    }
+
+    uint32_t start_cpu = (threadno * cpucnt) % num_cpus;
+    uint32_t end_cpu   = (start_cpu + cpucnt - 1U) % num_cpus;
+    LOG_D("Setting CPU affinity for the current thread #%" PRIu32 " to %" PRIu32
+          " consecutive CPUs, (start:%" PRIu32 "-end:%" PRIu32 ") total_cpus:%" PRIu32,
+        threadno, cpucnt, start_cpu, end_cpu, num_cpus);
+
+#if defined(_HF_ARCH_LINUX) || defined(__FreeBSD__) || defined(_HF_ARCH_NETBSD) ||                 \
+    defined(__DragonFly__)
+#if defined(_HF_ARCH_LINUX) || defined(__DragonFly__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+#endif /* defined(_HF_ARCH_LINUX) */
+#if defined(__FreeBSD__)
+    cpuset_t set;
+    CPU_ZERO(&set);
+#endif /* defined(__FreeBSD__) || defined(_HF_ARCH_NETBSD) */
+#if defined(_HF_ARCH_NETBSD)
+    cpuset_t* set = cpuset_create();
+    defer {
+        cpuset_destroy(set);
+    };
+#endif /* defined(_HF_ARCH_NETBSD) */
+
+    for (uint32_t i = 0; i < cpucnt; i++) {
+#if defined(_HF_ARCH_NETBSD)
+        cpuset_set((start_cpu + i) % num_cpus, set);
+#else  /* defined((_HF_ARCH_NETBSD) */
+        CPU_SET((start_cpu + i) % num_cpus, &set);
+#endif /* defined((_HF_ARCH_NETBSD) */
+    }
+
+#if defined(_HF_ARCH_NETBSD)
+    if (pthread_setaffinity_np(pthread_self(), cpuset_size(set), set) != 0) {
+#else  /* defined((_HF_ARCH_NETBSD) */
+    if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0) {
+#endif /* defined((_HF_ARCH_NETBSD) */
+        PLOG_W("pthread_setaffinity_np(thread=#%" PRIu32 "), failed", threadno);
+        return false;
+    }
+    return true;
+#elif defined(__sun)
+    psetid_t set;
+    pid_t    p;
+    bool     ret = true;
+
+    if (pset_create(&set) != 0) {
+        PLOG_W("pset_create failed");
+        return false;
+    }
+
+    for (uint32_t i = 0; i < cpucnt; i++) {
+        if (pset_assign(set, ((start_cpu + i) % num_cpus), NULL) != 0) {
+            PLOG_W("pset_assign(%" PRIu32 "), failed", i);
+            pset_destroy(set);    // TODO: defer mechanism not yet supported
+            return false;
+        }
+    }
+
+    p = getpid();
+
+    if (pset_bind(set, P_PID, p, NULL) != 0) {
+        PLOG_W("pset_bind(%ld) failed", (long)p);
+        ret = false;
+    }
+
+    pset_destroy(set);
+    return ret;
+#endif /* defined(_HF_ARCH_LINUX) || defined(__FreeBSD__) || defined(_HF_ARCH_NETBSD) */
+    LOG_W("util_PinThreadToCPUs() not implemented for the current architecture");
+    return false;
+}
 
 void* util_Malloc(size_t sz) {
     void* p = malloc(sz);
@@ -99,6 +226,7 @@ static __thread pthread_once_t rndThreadOnce = PTHREAD_ONCE_INIT;
 static __thread uint64_t       rndState[2];
 
 static void util_rndInitThread(void) {
+#if !defined(BSD)
     int fd = TEMP_FAILURE_RETRY(open("/dev/urandom", O_RDONLY | O_CLOEXEC));
     if (fd == -1) {
         PLOG_F("Couldn't open /dev/urandom for reading");
@@ -107,12 +235,15 @@ static void util_rndInitThread(void) {
         PLOG_F("Couldn't read '%zu' bytes from /dev/urandom", sizeof(rndState));
     }
     close(fd);
+#else
+    arc4random_buf((void*)rndState, sizeof(rndState));
+#endif
 }
 
 /*
  * xoroshiro128plus by David Blackman and Sebastiano Vigna
  */
-static inline uint64_t util_RotL(const uint64_t x, int k) {
+static inline uint64_t __attribute__((const)) util_RotL(const uint64_t x, int k) {
     return (x << k) | (x >> (64 - k));
 }
 

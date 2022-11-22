@@ -172,13 +172,15 @@ Options:
  --report|-R VALUE
 	Write report to this file (default: '<workdir>/HONGGFUZZ.REPORT.TXT')
  --max_file_size|-F VALUE
-	Maximal size of files processed by the fuzzer in bytes (default: 134217728 = 128MB)
+	Maximal size of files processed by the fuzzer in bytes (default: 1048576 = 1MB)
  --clear_env 
 	Clear all environment variables before executing the binary
  --env|-E VALUE
 	Pass this environment variable, can be used multiple times
  --save_all|-u 
 	Save all test-cases (not only the unique ones) by appending the current time-stamp to the filenames
+ --save_smaller|-U
+    Save smaller test-cases, renaming first found with .orig suffix
  --tmout_sigvtalrm|-T 
 	Use SIGVTALRM to kill timeouting processes (default: use SIGKILL)
  --sanitizers|-S 

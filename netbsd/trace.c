@@ -28,16 +28,7 @@
 #include <sys/types.h>
 // clang-format on
 
-#include <sys/ptrace.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/sysctl.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-#include <sys/wait.h>
-
+#include <capstone/capstone.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <elf.h>
@@ -49,6 +40,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ptrace.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -60,8 +60,6 @@
 #include "report.h"
 #include "sanitizers.h"
 #include "subproc.h"
-
-#include <capstone/capstone.h>
 
 /*
  * Size in characters required to store a string representation of a
@@ -187,6 +185,8 @@ static size_t arch_getPC(
     *status_reg = r.regs[_REG_EFLAGS];
 #elif defined(__x86_64__)
     *status_reg = r.regs[_REG_RFLAGS];
+#elif defined(__aarch64__)
+    *status_reg = r.r_spsr;
 #else
 #error unsupported CPU architecture
 #endif
@@ -361,7 +361,7 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
 
     /*
      * Temp local copy of previous backtrace value in case worker hit crashes into multiple
-     * tids for same target master thread. Will be 0 for first crash against target.
+     * tids for same target main thread. Will be 0 for first crash against target.
      */
     uint64_t oldBacktrace = run->backtrace;
 
@@ -380,7 +380,7 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
 
     /*
      * If worker crashFileName member is set, it means that a tid has already crashed
-     * from target master thread.
+     * from target main thread.
      */
     if (run->crashFileName[0] != '\0') {
         LOG_D("Multiple crashes detected from worker against attached tids group");
@@ -399,8 +399,8 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
     ATOMIC_POST_INC(run->global->cnts.crashesCnt);
 
     /*
-     * Check if backtrace contains whitelisted symbol. Whitelist overrides
-     * both stackhash and symbol blacklist. Crash is always kept regardless
+     * Check if backtrace contains allowlisted symbol. Whitelist overrides
+     * both stackhash and symbol blocklist. Crash is always kept regardless
      * of the status of uniqueness flag.
      */
     if (run->global->arch_netbsd.symsWl) {
@@ -408,14 +408,14 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
             run->global->arch_netbsd.symsWlCnt, run->global->arch_netbsd.symsWl, funcCnt, funcs);
         if (wlSymbol != NULL) {
             saveUnique = false;
-            LOG_D("Whitelisted symbol '%s' found, skipping blacklist checks", wlSymbol);
+            LOG_D("Whitelisted symbol '%s' found, skipping blocklist checks", wlSymbol);
         }
     } else {
         /*
-         * Check if stackhash is blacklisted
+         * Check if stackhash is blocklisted
          */
-        if (run->global->feedback.blacklist &&
-            (fastArray64Search(run->global->feedback.blacklist, run->global->feedback.blacklistCnt,
+        if (run->global->feedback.blocklist &&
+            (fastArray64Search(run->global->feedback.blocklist, run->global->feedback.blocklistCnt,
                  run->backtrace) != -1)) {
             LOG_I("Blacklisted stack hash '%" PRIx64 "', skipping", run->backtrace);
             ATOMIC_POST_INC(run->global->cnts.blCrashesCnt);
@@ -423,7 +423,7 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
         }
 
         /*
-         * Check if backtrace contains blacklisted symbol
+         * Check if backtrace contains blocklisted symbol
          */
         char* blSymbol = arch_btContainsSymbol(
             run->global->arch_netbsd.symsBlCnt, run->global->arch_netbsd.symsBl, funcCnt, funcs);
@@ -434,7 +434,7 @@ static void arch_traceSaveData(run_t* run, pid_t pid) {
         }
     }
 
-    /* If non-blacklisted crash detected, zero set two MSB */
+    /* If non-blocklisted crash detected, zero set two MSB */
     ATOMIC_POST_ADD(run->global->cfg.dynFileIterExpire, _HF_DYNFILE_SUB_MASK);
 
     /* If dry run mode, copy file with same name into workspace */

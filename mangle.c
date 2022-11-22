@@ -141,10 +141,19 @@ static inline void mangle_Insert(
 }
 
 static inline void mangle_UseValue(run_t* run, const uint8_t* val, size_t len, bool printable) {
-    if (util_rnd64() % 2) {
-        mangle_Insert(run, mangle_getOffSetPlus1(run), val, len, printable);
-    } else {
+    if (util_rnd64() & 1) {
         mangle_Overwrite(run, mangle_getOffSet(run), val, len, printable);
+    } else {
+        mangle_Insert(run, mangle_getOffSetPlus1(run), val, len, printable);
+    }
+}
+
+static inline void mangle_UseValueAt(
+    run_t* run, size_t off, const uint8_t* val, size_t len, bool printable) {
+    if (util_rnd64() & 1) {
+        mangle_Overwrite(run, off, val, len, printable);
+    } else {
+        mangle_Insert(run, off, val, len, printable);
     }
 }
 
@@ -184,7 +193,7 @@ static void mangle_MemCopy(run_t* run, bool printable HF_ATTR_UNUSED) {
     defer {
         free(tmpbuf);
     };
-    memcpy(tmpbuf, &run->dynfile->data[off], len);
+    memmove(tmpbuf, &run->dynfile->data[off], len);
 
     mangle_UseValue(run, tmpbuf, len, printable);
 }
@@ -202,7 +211,7 @@ static void mangle_Bytes(run_t* run, bool printable) {
     mangle_UseValue(run, (const uint8_t*)&buf, toCopy, printable);
 }
 
-static void mangle_ByteRepeatOverwrite(run_t* run, bool printable) {
+static void mangle_ByteRepeat(run_t* run, bool printable) {
     size_t off     = mangle_getOffSet(run);
     size_t destOff = off + 1;
     size_t maxSz   = run->dynfile->size - destOff;
@@ -214,22 +223,9 @@ static void mangle_ByteRepeatOverwrite(run_t* run, bool printable) {
     }
 
     size_t len = mangle_getLen(maxSz);
-    memset(&run->dynfile->data[destOff], run->dynfile->data[off], len);
-}
-
-static void mangle_ByteRepeatInsert(run_t* run, bool printable) {
-    size_t off     = mangle_getOffSet(run);
-    size_t destOff = off + 1;
-    size_t maxSz   = run->dynfile->size - destOff;
-
-    /* No space to repeat */
-    if (!maxSz) {
-        mangle_Bytes(run, printable);
-        return;
+    if (util_rnd64() & 0x1) {
+        len = mangle_Inflate(run, destOff, len, printable);
     }
-
-    size_t len = mangle_getLen(maxSz);
-    len        = mangle_Inflate(run, destOff, len, printable);
     memset(&run->dynfile->data[destOff], run->dynfile->data[off], len);
 }
 
@@ -528,24 +524,32 @@ static void mangle_MemSet(run_t* run, bool printable) {
     size_t len = mangle_getLen(run->dynfile->size - off);
     int    val = printable ? (int)util_rndPrintable() : (int)util_rndGet(0, UINT8_MAX);
 
+    if (util_rnd64() & 1) {
+        len = mangle_Inflate(run, off, len, printable);
+    }
+
     memset(&run->dynfile->data[off], val, len);
 }
 
-static void mangle_RandomOverwrite(run_t* run, bool printable) {
+static void mangle_MemClr(run_t* run, bool printable) {
     size_t off = mangle_getOffSet(run);
     size_t len = mangle_getLen(run->dynfile->size - off);
-    if (printable) {
-        util_rndBufPrintable(&run->dynfile->data[off], len);
-    } else {
-        util_rndBuf(&run->dynfile->data[off], len);
+    int    val = printable ? ' ' : 0;
+
+    if (util_rnd64() & 1) {
+        len = mangle_Inflate(run, off, len, printable);
     }
+
+    memset(&run->dynfile->data[off], val, len);
 }
 
-static void mangle_RandomInsert(run_t* run, bool printable) {
+static void mangle_RandomBuf(run_t* run, bool printable) {
     size_t off = mangle_getOffSet(run);
     size_t len = mangle_getLen(run->dynfile->size - off);
 
-    len = mangle_Inflate(run, off, len, printable);
+    if (util_rnd64() & 1) {
+        len = mangle_Inflate(run, off, len, printable);
+    }
 
     if (printable) {
         util_rndBufPrintable(&run->dynfile->data[off], len);
@@ -719,46 +723,71 @@ static void mangle_ASCIINumChange(run_t* run, bool printable) {
             break;
         }
     }
-    if (off == run->dynfile->size) {
-        mangle_Bytes(run, printable);
+    size_t left = run->dynfile->size - off;
+    if (left == 0) {
         return;
     }
 
-    size_t len        = HF_MIN(20, run->dynfile->size - off);
-    char   numbuf[21] = {};
-    strncpy(numbuf, (const char*)&run->dynfile->data[off], len);
-    uint64_t val = (uint64_t)strtoull(numbuf, NULL, 10);
+    size_t   len = 0;
+    uint64_t val = 0;
+    /* 20 is maximum lenght of a string representing a 64-bit unsigned value */
+    for (len = 0; (len < 20) && (len < left); len++) {
+        char c = run->dynfile->data[off + len];
+        if (!isdigit(c)) {
+            break;
+        }
+        val *= 10;
+        val += (c - '0');
+    }
 
-    switch (util_rndGet(0, 5)) {
+    switch (util_rndGet(0, 7)) {
         case 0:
-            val += util_rndGet(1, 256);
+            val++;
             break;
         case 1:
-            val -= util_rndGet(1, 256);
+            val--;
             break;
         case 2:
-            val *= util_rndGet(1, 256);
+            val *= 2;
             break;
         case 3:
-            val /= util_rndGet(1, 256);
+            val /= 2;
             break;
         case 4:
-            val = ~(val);
+            val = util_rnd64();
             break;
         case 5:
-            val = util_rnd64();
+            val += util_rndGet(1, 256);
+            break;
+        case 6:
+            val -= util_rndGet(1, 256);
+            break;
+        case 7:
+            val = ~(val);
             break;
         default:
             LOG_F("Invalid choice");
     };
 
-    len = HF_MIN((size_t)snprintf(numbuf, sizeof(numbuf), "%" PRIu64, val), len);
-    mangle_Overwrite(run, off, (const uint8_t*)numbuf, len, printable);
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%-19" PRIu64, val);
+
+    mangle_UseValueAt(run, off, (const uint8_t*)buf, len, printable);
 }
 
 static void mangle_Splice(run_t* run, bool printable) {
-    const uint8_t* buf;
-    size_t         sz = input_getRandomInputAsBuf(run, &buf);
+    if (run->global->feedback.dynFileMethod == _HF_DYNFILE_NONE) {
+        mangle_Bytes(run, printable);
+        return;
+    }
+
+    size_t         sz  = 0;
+    const uint8_t* buf = input_getRandomInputAsBuf(run, &sz);
+    if (!buf) {
+        LOG_E("input_getRandomInputAsBuf() returned no input");
+        mangle_Bytes(run, printable);
+        return;
+    }
     if (!sz) {
         mangle_Bytes(run, printable);
         return;
@@ -814,10 +843,6 @@ static void mangle_Resize(run_t* run, bool printable) {
 
 void mangle_mangleContent(run_t* run, int speed_factor) {
     static void (*const mangleFuncs[])(run_t * run, bool printable) = {
-        /* Every *Insert or Expand expands file, so add more Shrink's */
-        mangle_Shrink,
-        mangle_Shrink,
-        mangle_Shrink,
         mangle_Shrink,
         mangle_Expand,
         mangle_Bit,
@@ -826,18 +851,17 @@ void mangle_mangleContent(run_t* run, int speed_factor) {
         mangle_NegByte,
         mangle_AddSub,
         mangle_MemSet,
+        mangle_MemClr,
         mangle_MemSwap,
         mangle_MemCopy,
         mangle_Bytes,
         mangle_ASCIINum,
         mangle_ASCIINumChange,
-        mangle_ByteRepeatOverwrite,
-        mangle_ByteRepeatInsert,
+        mangle_ByteRepeat,
         mangle_Magic,
         mangle_StaticDict,
         mangle_ConstFeedbackDict,
-        mangle_RandomOverwrite,
-        mangle_RandomInsert,
+        mangle_RandomBuf,
         mangle_Splice,
     };
 
@@ -855,20 +879,28 @@ void mangle_mangleContent(run_t* run, int speed_factor) {
     } else if (speed_factor < 10) {
         changesCnt = run->global->mutate.mutationsPerRun;
     } else {
-        changesCnt = HF_MIN(speed_factor, 12);
-        changesCnt = HF_MAX(changesCnt, run->global->mutate.mutationsPerRun);
+        changesCnt = HF_MIN(speed_factor, 10);
+        changesCnt = HF_MAX(changesCnt, (run->global->mutate.mutationsPerRun * 5));
     }
 
     /* If last coverage acquisition was more than 5 secs ago, use splicing more frequently */
     if ((time(NULL) - ATOMIC_GET(run->global->timing.lastCovUpdate)) > 5) {
-        if (util_rnd64() % 2) {
+        if (util_rnd64() & 0x1) {
             mangle_Splice(run, run->global->cfg.only_printable);
         }
     }
 
     for (uint64_t x = 0; x < changesCnt; x++) {
-        uint64_t choice = util_rndGet(0, ARRAYSIZE(mangleFuncs) - 1);
-        mangleFuncs[choice](run, /* printable= */ run->global->cfg.only_printable);
+        if (run->global->feedback.cmpFeedback && (util_rnd64() & 0x1)) {
+            /*
+             * mangle_ConstFeedbackDict() is quite powerful if the dynamic feedback dictionary
+             * exists. If so, give it 50% chance of being used among all mangling functions.
+             */
+            mangle_ConstFeedbackDict(run, /* printable= */ run->global->cfg.only_printable);
+        } else {
+            uint64_t choice = util_rndGet(0, ARRAYSIZE(mangleFuncs) - 1);
+            mangleFuncs[choice](run, /* printable= */ run->global->cfg.only_printable);
+        }
     }
 
     wmb();
